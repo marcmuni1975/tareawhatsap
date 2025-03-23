@@ -7,7 +7,11 @@ import os
 
 app = Flask(__name__)
 app.config.from_object(Config)
-app.secret_key = os.urandom(24)
+app.secret_key = os.getenv('SECRET_KEY', os.urandom(24))
+
+# Configurar el host y puerto para Railway
+port = int(os.getenv('PORT', 8080))
+host = '0.0.0.0'  # Necesario para Railway
 
 db.init_app(app)
 
@@ -145,4 +149,4 @@ def test_whatsapp():
         return f"Error: {str(e)}"
 
 if __name__ == '__main__':
-    app.run(debug=True, port=8080)
+    app.run(host=host, port=port, debug=False)
