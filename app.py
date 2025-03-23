@@ -1,8 +1,9 @@
-from flask import Flask, render_template, request, flash, redirect, url_for
+from flask import Flask, render_template, request, flash, redirect, url_for, session
 from datetime import datetime
-from models import db, Task
+from models import db, Task, User
 from config import Config
 from scheduler import init_scheduler
+from auth import login_required, master_required
 import os
 
 app = Flask(__name__)
@@ -17,16 +18,86 @@ db.init_app(app)
 
 with app.app_context():
     db.create_all()
-    scheduler = init_scheduler(app)  # Pasar la aplicación al scheduler
+    # Crear usuario maestro por defecto si no existe
+    User.create_master_user('admin', 'adminpass123')
+    scheduler = init_scheduler(app)
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        
+        user = User.query.filter_by(username=username).first()
+        if user and user.check_password(password):
+            session['user_id'] = user.id
+            flash('Inicio de sesión exitoso', 'success')
+            return redirect(url_for('index'))
+        
+        flash('Usuario o contraseña incorrectos', 'error')
+    return render_template('login.html')
+
+@app.route('/logout')
+def logout():
+    session.pop('user_id', None)
+    flash('Has cerrado sesión', 'success')
+    return redirect(url_for('login'))
+
+@app.route('/users')
+@master_required
+def list_users():
+    users = User.query.all()
+    return render_template('users.html', users=users)
+
+@app.route('/users/add', methods=['POST'])
+@master_required
+def add_user():
+    try:
+        username = request.form['username']
+        password = request.form['password']
+        
+        if User.query.filter_by(username=username).first():
+            flash('El nombre de usuario ya existe', 'error')
+            return redirect(url_for('list_users'))
+        
+        user = User(username=username, created_by=session['user_id'])
+        user.set_password(password)
+        db.session.add(user)
+        db.session.commit()
+        flash('Usuario creado exitosamente', 'success')
+    except Exception as e:
+        flash(f'Error al crear usuario: {str(e)}', 'error')
+    return redirect(url_for('list_users'))
+
+@app.route('/users/delete/<int:user_id>')
+@master_required
+def delete_user(user_id):
+    if user_id == session['user_id']:
+        flash('No puedes eliminar tu propio usuario', 'error')
+        return redirect(url_for('list_users'))
+    
+    user = User.query.get_or_404(user_id)
+    if user.is_master:
+        flash('No se puede eliminar el usuario maestro', 'error')
+        return redirect(url_for('list_users'))
+    
+    try:
+        db.session.delete(user)
+        db.session.commit()
+        flash('Usuario eliminado exitosamente', 'success')
+    except Exception as e:
+        flash(f'Error al eliminar usuario: {str(e)}', 'error')
+    return redirect(url_for('list_users'))
 
 @app.route('/')
+@login_required
 def index():
     # Obtener parámetros de búsqueda
     search = request.args.get('search', '').strip()
     status = request.args.get('status', '')
     
     # Construir la consulta base
-    query = Task.query
+    query = Task.query.filter_by(created_by=session['user_id'])
     
     # Aplicar filtros de búsqueda
     if search:
@@ -42,13 +113,15 @@ def index():
     return render_template('index.html', tasks=tasks)
 
 @app.route('/task/add', methods=['POST'])
+@login_required
 def add_task():
     try:
         due_date = datetime.strptime(request.form['due_date'], '%Y-%m-%d')
         task = Task(
             description=request.form['description'],
             due_date=due_date,
-            phone=Config.PHONE_NUMBER  # Usar el número configurado por defecto
+            phone=Config.PHONE_NUMBER,
+            created_by=session['user_id']
         )
         db.session.add(task)
         db.session.commit()
@@ -58,8 +131,13 @@ def add_task():
     return redirect(url_for('index'))
 
 @app.route('/task/edit/<int:task_id>', methods=['POST'])
+@login_required
 def edit_task(task_id):
     task = Task.query.get_or_404(task_id)
+    if task.created_by != session['user_id']:
+        flash('No tienes permiso para editar esta tarea', 'error')
+        return redirect(url_for('index'))
+    
     try:
         task.description = request.form['description']
         task.due_date = datetime.strptime(request.form['due_date'], '%Y-%m-%d')
@@ -70,8 +148,13 @@ def edit_task(task_id):
     return redirect(url_for('index'))
 
 @app.route('/task/delete/<int:task_id>')
+@login_required
 def delete_task(task_id):
     task = Task.query.get_or_404(task_id)
+    if task.created_by != session['user_id']:
+        flash('No tienes permiso para eliminar esta tarea', 'error')
+        return redirect(url_for('index'))
+    
     try:
         db.session.delete(task)
         db.session.commit()
@@ -90,6 +173,7 @@ def confirm_task(code):
     return "Código de confirmación no válido."
 
 @app.route('/task/import', methods=['POST'])
+@login_required
 def import_tasks():
     if 'file' not in request.files:
         flash('No se seleccionó archivo', 'error')
@@ -118,7 +202,8 @@ def import_tasks():
                     task = Task(
                         description=description,
                         due_date=due_date,
-                        phone=Config.PHONE_NUMBER  # Usar el número configurado por defecto
+                        phone=Config.PHONE_NUMBER,
+                        created_by=session['user_id']
                     )
                     db.session.add(task)
                     tasks_added += 1
@@ -137,6 +222,7 @@ def import_tasks():
     return redirect(url_for('index'))
 
 @app.route('/test_whatsapp')
+@login_required
 def test_whatsapp():
     try:
         from whatsapp_service import send_whatsapp_message
