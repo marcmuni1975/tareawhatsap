@@ -3,7 +3,7 @@ import random
 import string
 from apscheduler.schedulers.background import BackgroundScheduler
 from models import Task, db
-from whatsapp_service import send_whatsapp_message
+from whatsapp_service import send_whatsapp_message, create_reminder_message
 
 def generate_confirmation_code():
     """Genera un código de confirmación aleatorio"""
@@ -27,7 +27,8 @@ def create_check_reminders_job(app):
             for task in tasks_7_days:
                 if not task.confirmation_code:
                     task.confirmation_code = generate_confirmation_code()
-                message = f"🔔 Recordatorio (7 días): {task.description} vence el {task.due_date.strftime('%Y-%m-%d')}. Para confirmar, responde: OK {task.confirmation_code}"
+                days_left = (task.due_date - now).days
+                message = create_reminder_message(task, days_left)
                 print(f"Enviando recordatorio 7 días para: {task.description}")
                 if send_whatsapp_message(task.phone, message):
                     task.reminder_7_sent = True
@@ -45,16 +46,42 @@ def create_check_reminders_job(app):
             for task in tasks_3_days:
                 if not task.confirmation_code:
                     task.confirmation_code = generate_confirmation_code()
-                message = f"🔔 Recordatorio (3 días): {task.description} vence el {task.due_date.strftime('%Y-%m-%d')}. Para confirmar, responde: OK {task.confirmation_code}"
+                days_left = (task.due_date - now).days
+                message = create_reminder_message(task, days_left)
                 print(f"Enviando recordatorio 3 días para: {task.description}")
                 if send_whatsapp_message(task.phone, message):
                     task.reminder_3_sent = True
                     task.last_reminder_sent = now
                     print("Recordatorio enviado exitosamente")
             
-            # Recordatorios diarios para tareas no confirmadas
-            tasks_daily = Task.query.filter(
+            # Recordatorios del último día (3 veces al día)
+            tasks_last_day = Task.query.filter(
+                Task.due_date <= now + timedelta(days=1),
                 Task.due_date > now,
+                Task.is_confirmed == False,
+                (Task.last_reminder_sent == None) | 
+                (Task.last_reminder_sent <= now - timedelta(hours=4))  # Recordar cada 4 horas
+            ).all()
+            
+            print(f"Encontradas {len(tasks_last_day)} tareas para último día")
+            for task in tasks_last_day:
+                if not task.confirmation_code:
+                    task.confirmation_code = generate_confirmation_code()
+                days_left = (task.due_date - now).days
+                message = create_reminder_message(task, days_left)
+                
+                # Agregar urgencia extra para el último día
+                if days_left == 0:
+                    message = "🔴 ¡ATENCIÓN! 🔴\n\n" + message
+                
+                print(f"Enviando recordatorio último día para: {task.description}")
+                if send_whatsapp_message(task.phone, message):
+                    task.last_reminder_sent = now
+                    print("Recordatorio enviado exitosamente")
+            
+            # Recordatorios diarios para tareas no confirmadas (que no sean del último día)
+            tasks_daily = Task.query.filter(
+                Task.due_date > now + timedelta(days=1),
                 Task.is_confirmed == False,
                 (Task.last_reminder_sent == None) | 
                 (Task.last_reminder_sent <= now - timedelta(hours=12))  # Recordar cada 12 horas
@@ -65,7 +92,7 @@ def create_check_reminders_job(app):
                 if not task.confirmation_code:
                     task.confirmation_code = generate_confirmation_code()
                 days_left = (task.due_date - now).days
-                message = f"⏰ Recordatorio: '{task.description}' vence en {days_left} días. Para dejar de recibir recordatorios, responde: OK {task.confirmation_code}"
+                message = create_reminder_message(task, days_left)
                 print(f"Enviando recordatorio diario para: {task.description}")
                 if send_whatsapp_message(task.phone, message):
                     task.last_reminder_sent = now
@@ -81,6 +108,4 @@ def init_scheduler(app):
     check_reminders_job = create_check_reminders_job(app)
     scheduler.add_job(check_reminders_job, 'interval', minutes=1)
     scheduler.start()
-    # Ejecutar una verificación inmediata
-    check_reminders_job()
     return scheduler
