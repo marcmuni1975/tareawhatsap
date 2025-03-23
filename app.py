@@ -13,7 +13,7 @@ db.init_app(app)
 
 with app.app_context():
     db.create_all()
-    scheduler = init_scheduler()
+    scheduler = init_scheduler(app)  # Pasar la aplicación al scheduler
 
 @app.route('/')
 def index():
